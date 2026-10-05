@@ -244,7 +244,9 @@ if (form) {
 
       statusBox.classList.remove('error');
       statusBox.classList.add('success');
-      statusBox.textContent = 'Your message has been successfully sent.';
+      statusBox.textContent = result.emailSent === false
+        ? 'Your message was saved, but the administrator email notification could not be sent.'
+        : 'Your message has been successfully sent.';
       form.reset();
     } catch (error) {
       console.error('Contact form submission failed:', error);
@@ -291,6 +293,7 @@ const adminState = {
   token: null,
   user: null,
   notifications: [],
+  unreadNotificationCount: 0,
   conversations: [],
   archivedConversations: [],
   searchResults: [],
@@ -377,6 +380,7 @@ const clearAdminSession = () => {
   adminState.token = null;
   adminState.user = null;
   adminState.notifications = [];
+  adminState.unreadNotificationCount = 0;
   adminState.conversations = [];
   adminState.archivedConversations = [];
   adminState.searchResults = [];
@@ -428,7 +432,7 @@ const clearAdminSession = () => {
 };
 
 const renderNotificationCount = () => {
-  const count = adminState.notifications.length;
+  const count = adminState.unreadNotificationCount;
 
   if (notificationCount) {
     notificationCount.textContent = String(count);
@@ -1187,6 +1191,14 @@ const renderNotifications = () => {
       <div class="conversation-control-row">
         <button
           type="button"
+          class="button button-secondary"
+          data-notification-read="${escapeHtml(item.id || '')}"
+          ${item.is_read ? 'disabled' : ''}
+        >
+          ${item.is_read ? 'Read' : 'Mark read'}
+        </button>
+        <button
+          type="button"
           class="button button-primary"
           data-notification-open="${escapeHtml(item.conversation_id || '')}"
         >
@@ -1230,6 +1242,15 @@ const renderNotifications = () => {
     }
   );
 
+  notificationList.querySelectorAll('[data-notification-read]').forEach(
+    (button) => {
+      button.addEventListener('click', async () => {
+        const id = button.getAttribute('data-notification-read');
+        if (id) await markNotificationRead(id);
+      });
+    }
+  );
+
   renderNotificationCount();
 };
 
@@ -1259,6 +1280,7 @@ const fetchNotifications = async () => {
       : Array.isArray(data?.notifications)
         ? data.notifications
         : [];
+      adminState.unreadNotificationCount = Number(result.unread_count ?? data?.unread_count ?? 0);
 
     renderNotifications();
 
@@ -1278,6 +1300,43 @@ const fetchNotifications = async () => {
       'error'
     );
 
+    return false;
+  }
+};
+
+const markNotificationRead = async (notificationId) => {
+  if (!notificationId || !adminState.token) return false;
+
+  try {
+    const result = await apiRequest(
+      `${API_BASE_URL}/api/notifications?id=${encodeURIComponent(notificationId)}`,
+      {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${adminState.token}` },
+      }
+    );
+    if (!result?.ok) throw new Error(result?.error || 'Unable to mark notification read.');
+    await fetchNotifications();
+    return true;
+  } catch (error) {
+    setStatus(notificationsStatus, mapApiError(error, 'Unable to mark notification read.'), 'error');
+    return false;
+  }
+};
+
+const markAllNotificationsRead = async () => {
+  if (!adminState.token) return false;
+
+  try {
+    const result = await apiRequest(`${API_BASE_URL}/api/notifications/read-all`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminState.token}` },
+    });
+    if (!result?.ok) throw new Error(result?.error || 'Unable to mark notifications read.');
+    await fetchNotifications();
+    return true;
+  } catch (error) {
+    setStatus(notificationsStatus, mapApiError(error, 'Unable to mark notifications read.'), 'error');
     return false;
   }
 };
@@ -1405,6 +1464,11 @@ document.getElementById('refreshArchivedBtn')?.addEventListener(
 document.getElementById('refreshNotificationsBtn')?.addEventListener(
   'click',
   () => fetchNotifications()
+);
+
+document.getElementById('markAllNotificationsReadBtn')?.addEventListener(
+  'click',
+  () => markAllNotificationsRead()
 );
 
 document.getElementById('conversationBackBtn')?.addEventListener(

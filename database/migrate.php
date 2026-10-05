@@ -21,6 +21,7 @@ function migrationFiles(): array
             'create_backend_foundation',
             'migrate_contact_messages',
             'seed_default_admin',
+            'add_notification_read_state',
         ]
     );
 }
@@ -31,6 +32,7 @@ function migrationId(string $file): string
         'create_backend_foundation' => '001_create_backend_foundation',
         'migrate_contact_messages' => '002_migrate_contact_messages',
         'seed_default_admin' => '003_seed_default_admin',
+        'add_notification_read_state' => '004_add_notification_read_state',
         default => basename($file, '.php'),
     };
 }

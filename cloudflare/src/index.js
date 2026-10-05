@@ -145,6 +145,41 @@ async function sendReplyEmail(env, conversation, body, fetchImplementation = fet
   }
 }
 
+async function sendAdminContactEmail(env, contact, fetchImplementation = fetch) {
+  const apiKey = env.BREVO_API_KEY;
+  const senderEmail = env.REPLY_FROM_EMAIL;
+  if (!apiKey || !senderEmail) {
+    return { enabled: false, sent: false, status: 'not_configured' };
+  }
+
+  try {
+    const response = await fetchImplementation('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'api-key': apiKey,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        sender: {
+          email: senderEmail,
+          name: env.REPLY_FROM_NAME || 'MyPortfolio',
+        },
+        to: [{ email: 'yangdarenaud893@gmail.com' }],
+        replyTo: { email: contact.email, name: contact.name },
+        subject: `New portfolio contact: ${contact.subject}`,
+        textContent: `Name: ${contact.name}\nEmail: ${contact.email}\nSubject: ${contact.subject}\n\n${contact.message}`,
+      }),
+    });
+
+    return response.ok
+      ? { enabled: true, sent: true, status: 'sent' }
+      : { enabled: true, sent: false, status: 'provider_error' };
+  } catch (error) {
+    return { enabled: true, sent: false, status: 'network_error' };
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -566,6 +601,11 @@ export default {
 
         const total = Number(count?.total || 0);
         const totalPages = total === 0 ? 0 : Math.ceil(total / perPage);
+        const unreadCount = await env.DB.prepare(
+          `SELECT COUNT(*) AS total
+           FROM notifications
+           WHERE recipient_type = 'admin' AND read_at IS NULL`
+        ).first();
 
         if (page > Math.max(1, totalPages)) {
           return jsonResponse({ ok: false, error: 'Page is out of range.' }, 400, headers);
@@ -580,6 +620,7 @@ export default {
                   notifications.recipient_type,
                   notifications.notification_type,
                   notifications.status,
+                  notifications.read_at,
                   notifications.attempt_count,
                   notifications.sent_at,
                   notifications.created_at,
@@ -607,6 +648,8 @@ export default {
             recipient_type: row.recipient_type,
             notification_type: row.notification_type,
             status: row.status,
+            is_read: row.read_at !== null,
+            read_at: row.read_at,
             attempt_count: Number(row.attempt_count),
             sent_at: row.sent_at,
             created_at: row.created_at,
@@ -622,13 +665,86 @@ export default {
             total,
             total_pages: totalPages,
           },
-          read_state_supported: false,
+          unread_count: Number(unreadCount?.total || 0),
+          read_state_supported: true,
         }, 200, headers);
       } catch (error) {
         return jsonResponse({
           ok: false,
           error: 'Notification service is temporarily unavailable.'
         }, 503, headers);
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/notifications/read-all') {
+      const rawToken = extractBearerToken(request);
+      if (!rawToken) {
+        return jsonResponse({ ok: false, error: 'Authentication required.' }, 401, headers);
+      }
+
+      try {
+        const tokenHash = await hashAuthToken(rawToken);
+        const activeToken = await findActiveAdminToken(env, tokenHash);
+        if (!activeToken) {
+          return jsonResponse({ ok: false, error: 'Authentication required.' }, 401, headers);
+        }
+
+        await updateAdminTokenLastUsed(env, activeToken.token_id);
+        const result = await env.DB.prepare(
+          `UPDATE notifications
+           SET read_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+           WHERE recipient_type = 'admin' AND read_at IS NULL`
+        ).run();
+
+        return jsonResponse({
+          ok: true,
+          data: { marked_read: Number(result?.meta?.changes || 0) },
+        }, 200, headers);
+      } catch (error) {
+        return jsonResponse({ ok: false, error: 'Notification service is temporarily unavailable.' }, 503, headers);
+      }
+    }
+
+    if (request.method === 'PATCH' && url.pathname === '/api/notifications') {
+      const rawToken = extractBearerToken(request);
+      if (!rawToken) {
+        return jsonResponse({ ok: false, error: 'Authentication required.' }, 401, headers);
+      }
+
+      try {
+        const tokenHash = await hashAuthToken(rawToken);
+        const activeToken = await findActiveAdminToken(env, tokenHash);
+        if (!activeToken) {
+          return jsonResponse({ ok: false, error: 'Authentication required.' }, 401, headers);
+        }
+
+        await updateAdminTokenLastUsed(env, activeToken.token_id);
+        const rawId = url.searchParams.get('id');
+        if (rawId === null || !/^\d+$/.test(rawId)) {
+          return jsonResponse({ ok: false, error: 'Invalid notification id.' }, 400, headers);
+        }
+
+        const notificationId = Number(rawId);
+        if (!Number.isSafeInteger(notificationId) || notificationId < 1) {
+          return jsonResponse({ ok: false, error: 'Invalid notification id.' }, 400, headers);
+        }
+
+        const result = await env.DB.prepare(
+          `UPDATE notifications
+           SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND recipient_type = 'admin'`
+        ).bind(notificationId).run();
+
+        if (Number(result?.meta?.changes || 0) !== 1) {
+          return jsonResponse({ ok: false, error: 'Notification not found.' }, 404, headers);
+        }
+
+        return jsonResponse({
+          ok: true,
+          data: { id: String(notificationId), is_read: true },
+        }, 200, headers);
+      } catch (error) {
+        return jsonResponse({ ok: false, error: 'Notification service is temporarily unavailable.' }, 503, headers);
       }
     }
 
@@ -1230,7 +1346,31 @@ export default {
           }, 429, headers);
         }
 
-        return jsonResponse({ ok: true, message: 'Your message has been successfully sent.' }, 201, headers);
+        const emailResult = await sendAdminContactEmail(env, { name, email, subject, message });
+        const notificationId = Number(batchResults[3]?.meta?.last_row_id || 0);
+        if (notificationId) {
+          try {
+            await env.DB.prepare(
+              `UPDATE notifications
+               SET status = ?, attempt_count = attempt_count + 1,
+                   last_error = ?, sent_at = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND recipient_type = 'admin'`
+            ).bind(
+              emailResult.sent ? 'sent' : 'failed',
+              emailResult.sent ? null : emailResult.status,
+              emailResult.sent ? new Date().toISOString() : null,
+              notificationId
+            ).run();
+          } catch {}
+        }
+
+        return jsonResponse({
+          ok: true,
+          saved: true,
+          notificationCreated: true,
+          emailSent: emailResult.sent,
+          message: 'Your message has been successfully sent.',
+        }, 201, headers);
       } catch (error) {
         return jsonResponse({ ok: false, error: 'The message could not be saved.' }, 500, headers);
       }
@@ -1253,4 +1393,4 @@ export default {
   },
 };
 
-export { sendReplyEmail };
+export { sendAdminContactEmail, sendReplyEmail };

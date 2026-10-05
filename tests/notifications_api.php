@@ -18,6 +18,7 @@ $inactiveAdminId = null;
 $conversationId = null;
 $messageId = null;
 $notificationIds = [];
+$previousUnreadNotifications = [];
 
 function check(bool $condition, string $message): void
 {
@@ -167,7 +168,9 @@ try {
     check(($response['data'][0]['notification_type'] ?? '') === 'new_contact_message', 'existing notification type is preserved');
     check(($response['data'][0]['status'] ?? '') === 'pending', 'existing notification status is preserved');
     check(($response['data'][0]['conversation_id'] ?? '') === (string) $conversationId, 'conversation reference is returned safely');
-    check(($response['read_state_supported'] ?? true) === false, 'read state limitation is explicit');
+    check(($response['data'][0]['is_read'] ?? true) === false, 'new notification is unread');
+    check(($response['unread_count'] ?? 0) === 1, 'unread count is scoped to admin notifications');
+    check(($response['read_state_supported'] ?? false) === true, 'read state support is reported');
     check(!str_contains($body, 'token_hash') && !str_contains($body, 'password_hash') && !str_contains($body, $rawToken), 'notification response excludes secrets');
 
     [$status, $body] = request($listUrl . '?per_page=1&page=1', 'GET', null, $marker . '-page', $rawToken);
@@ -184,9 +187,44 @@ try {
     [$status] = request($listUrl . '?id=' . rawurlencode("1 OR 1=1"), 'GET', null, $marker . '-injection', $rawToken);
     check($status === 200, 'unrecognized query fields do not alter notification SQL');
 
+    [$status] = request($listUrl . '?id=' . $notificationIds[0], 'PATCH', null, $marker . '-read', $rawToken);
+    check($status === 200, 'authenticated mark-read succeeds');
+    $storedReadAt = $pdo->prepare('SELECT read_at FROM notifications WHERE id = :id');
+    $storedReadAt->execute([':id' => $notificationIds[0]]);
+    check($storedReadAt->fetchColumn() !== null, 'read timestamp persists in the database');
+    [$status, $body] = request($listUrl, 'GET', null, $marker . '-reload-read', $rawToken);
+    $reloaded = decode($body);
+    check($status === 200 && ($reloaded['data'][0]['is_read'] ?? false) === true, 'read state survives list reload');
+    check(($reloaded['unread_count'] ?? -1) === 0, 'unread count updates after mark-read');
+
+    $notification->execute([
+        ':conversation_id' => $conversationId,
+        ':message_id' => $messageId,
+        ':recipient_type' => 'admin',
+        ':notification_type' => 'new_contact_message',
+        ':status' => 'pending',
+    ]);
+    $notificationIds[] = (int) $pdo->lastInsertId();
+    $previousUnreadNotifications = $pdo->query(
+        "SELECT id, updated_at FROM notifications WHERE recipient_type = 'admin' AND read_at IS NULL"
+    )->fetchAll();
+    [$status] = request($listUrl, 'POST', null, $marker . '-read-all', $rawToken);
+    check($status === 200, 'authenticated mark-all-read succeeds');
+    $unreadAfterAll = $pdo->query("SELECT COUNT(*) FROM notifications WHERE recipient_type = 'admin' AND read_at IS NULL")->fetchColumn();
+    check((int) $unreadAfterAll === 0, 'mark-all-read persists for every admin notification');
+
+    [$status] = request($listUrl, 'PATCH', null, $marker . '-read-unauthenticated');
+    check($status === 401, 'unauthenticated mark-read is rejected');
+
     [$status, $body] = request($listUrl, 'OPTIONS', null, $marker . '-preflight', null, $origin);
     check($status === 204 && $body === '', 'notification preflight succeeds without a body');
 } finally {
+    if ($previousUnreadNotifications !== []) {
+        $restoreUnread = $pdo->prepare('UPDATE notifications SET read_at = NULL, updated_at = :updated_at WHERE id = :id');
+        foreach ($previousUnreadNotifications as $row) {
+            $restoreUnread->execute([':updated_at' => $row['updated_at'], ':id' => $row['id']]);
+        }
+    }
     if ($notificationIds !== []) {
         $placeholders = implode(',', array_fill(0, count($notificationIds), '?'));
         $pdo->prepare("DELETE FROM notifications WHERE id IN ({$placeholders})")->execute($notificationIds);

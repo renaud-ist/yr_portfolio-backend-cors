@@ -45,11 +45,11 @@ Do not commit secret values. Keep secrets in the Cloudflare environment rather t
 
 Required secret:
 
-- `BREVO_API_KEY` — used by the Worker to send admin replies through Brevo
+- `BREVO_API_KEY` — used by the Worker to send contact notifications and admin replies through Brevo
 
 Configured non-secret variable:
 
-- `REPLY_FROM_EMAIL` — verified sender email used in outbound admin replies
+- `REPLY_FROM_EMAIL` — verified sender email used in outbound contact notifications and admin replies
 
 Optional non-secret variable:
 
@@ -107,6 +107,8 @@ The production Worker exposes these authenticated or public routes:
 - `DELETE /api/conversation?id=<id>`
 - `POST /api/conversation/reply?id=<id>`
 - `GET /api/notifications`
+- `PATCH /api/notifications?id=<id>`
+- `POST /api/notifications/read-all`
 - `DELETE /api/notifications?id=<id>`
 
 The frontend is the consumer of these routes.

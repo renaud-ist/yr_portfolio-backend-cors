@@ -69,7 +69,9 @@ function authApplyCors(string $methods): void
 
 function authRequireMethod(string $method): void
 {
-    if ($_SERVER['REQUEST_METHOD'] !== $method) {
+    $allowedMethods = array_map('trim', explode(',', $method));
+    $requestMethod = strtoupper($_SERVER['REQUEST_METHOD'] ?? '');
+    if (!in_array($requestMethod, $allowedMethods, true)) {
         header('Allow: ' . $method . ', OPTIONS');
         authResponse(['ok' => false, 'error' => 'Method not allowed.'], 405);
     }

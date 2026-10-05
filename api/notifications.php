@@ -4,8 +4,9 @@ declare(strict_types=1);
 
 require __DIR__ . '/auth/common.php';
 
-authApplyCors('GET');
-authRequireMethod('GET');
+authApplyCors('GET, PATCH, POST');
+$method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+authRequireMethod('GET, PATCH, POST');
 $pdo = authDatabaseRequired();
 authRequireBearer($pdo);
 
@@ -50,6 +51,48 @@ function notificationFilter(string $name, PDO $pdo): ?string
     return $value;
 }
 
+if ($method === 'POST') {
+    try {
+        $update = $pdo->prepare(
+            "UPDATE notifications
+             SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+             WHERE recipient_type = 'admin' AND read_at IS NULL"
+        );
+        $update->execute();
+        authResponse(['ok' => true, 'data' => ['marked_read' => $update->rowCount()]]);
+    } catch (Throwable $error) {
+        error_log('Notification mark-all-read failed: ' . $error->getMessage());
+        notificationResponse(['ok' => false, 'error' => 'Notification service is temporarily unavailable.'], 503);
+    }
+}
+
+if ($method === 'PATCH') {
+    $id = filter_var($_GET['id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+    if ($id === false) {
+        notificationResponse(['ok' => false, 'error' => 'Invalid notification id.'], 400);
+    }
+
+    try {
+        $update = $pdo->prepare(
+            "UPDATE notifications
+             SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+             WHERE id = :id AND recipient_type = 'admin'"
+        );
+        $update->execute([':id' => $id]);
+        if ($update->rowCount() === 0) {
+            $exists = $pdo->prepare("SELECT 1 FROM notifications WHERE id = :id AND recipient_type = 'admin'");
+            $exists->execute([':id' => $id]);
+            if (!$exists->fetchColumn()) {
+                notificationResponse(['ok' => false, 'error' => 'Notification not found.'], 404);
+            }
+        }
+        authResponse(['ok' => true, 'data' => ['id' => (string) $id, 'is_read' => true]]);
+    } catch (Throwable $error) {
+        error_log('Notification mark-read failed: ' . $error->getMessage());
+        notificationResponse(['ok' => false, 'error' => 'Notification service is temporarily unavailable.'], 503);
+    }
+}
+
 try {
     $page = notificationInteger('page', 1, PHP_INT_MAX);
     $perPage = notificationInteger('per_page', 20, 100);
@@ -72,6 +115,8 @@ try {
     $count->execute($params);
     $total = (int) $count->fetchColumn();
     $totalPages = $total === 0 ? 0 : (int) ceil($total / $perPage);
+    $unread = $pdo->query("SELECT COUNT(*) FROM notifications WHERE recipient_type = 'admin' AND read_at IS NULL");
+    $unreadCount = (int) $unread->fetchColumn();
     if ($page > max(1, $totalPages)) {
         notificationResponse(['ok' => false, 'error' => 'Page is out of range.'], 400);
     }
@@ -79,7 +124,7 @@ try {
     $list = $pdo->prepare(
         'SELECT notifications.id, notifications.conversation_id, notifications.conversation_message_id,
                 notifications.recipient_type, notifications.notification_type, notifications.status,
-                notifications.attempt_count, notifications.sent_at, notifications.created_at, notifications.updated_at,
+                notifications.attempt_count, notifications.sent_at, notifications.read_at, notifications.created_at, notifications.updated_at,
                 conversations.contact_name, conversations.contact_email, conversations.subject,
                 conversation_messages.sender_type
          FROM notifications
@@ -104,6 +149,8 @@ try {
             'recipient_type' => $row['recipient_type'],
             'notification_type' => $row['notification_type'],
             'status' => $row['status'],
+            'is_read' => $row['read_at'] !== null,
+            'read_at' => $row['read_at'],
             'attempt_count' => (int) $row['attempt_count'],
             'sent_at' => $row['sent_at'],
             'created_at' => $row['created_at'],
@@ -124,7 +171,8 @@ try {
             'total' => $total,
             'total_pages' => $totalPages,
         ],
-        'read_state_supported' => false,
+        'unread_count' => $unreadCount,
+        'read_state_supported' => true,
     ]);
 } catch (Throwable $error) {
     error_log('Notification list failed: ' . $error->getMessage());

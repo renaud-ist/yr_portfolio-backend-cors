@@ -42,7 +42,7 @@ The Worker handles:
 - conversation retrieval and mutation
 - admin replies
 - notification queries
-- optional email delivery through Brevo
+- contact notification and optional admin-reply email delivery through Brevo
 
 The Worker reads the D1 binding from `wrangler.toml` and does not rely on PHP or MySQL for the verified production path.
 
@@ -80,6 +80,8 @@ PATCH  /api/conversation?id=<id>
 DELETE /api/conversation?id=<id>
 POST   /api/conversation/reply?id=<id>
 GET    /api/notifications
+PATCH  /api/notifications?id=<id>
+POST   /api/notifications/read-all
 DELETE /api/notifications?id=<id>
 ```
 
