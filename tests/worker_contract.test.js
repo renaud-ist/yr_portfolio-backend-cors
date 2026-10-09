@@ -39,6 +39,9 @@ function fakeDatabase() {
           if (sql.includes('FROM conversations')) {
             return { id: 12 };
           }
+          if (sql.includes('FROM notifications')) {
+            return { id: 8 };
+          }
           return null;
         },
         async all() {
@@ -61,11 +64,73 @@ function fakeDatabase() {
       batches.push(statements);
       return statements.map((statement, index) => ({
         success: true,
-        meta: { changes: 1, ...(index === 3 ? { last_row_id: 21 } : {}) },
+        meta: { changes: 1, ...([0, 3].includes(index) ? { last_row_id: 21 } : {}) },
       }));
     },
   };
 }
+
+test('admin reply response reports that the reply is saved when email is not configured', async () => {
+  const response = await worker.fetch(new Request('https://example.test/api/conversation/reply?id=12', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ body: 'A saved reply' }),
+  }), { DB: fakeDatabase() });
+
+  assert.equal(response.status, 201);
+  const payload = await response.json();
+  assert.equal(payload.saved, true);
+  assert.equal(payload.emailSent, false);
+  assert.equal(payload.data.email.status, 'not_configured');
+});
+
+test('admin reply response reports successful email delivery after saving', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 201 });
+  let response;
+  try {
+    response = await worker.fetch(new Request('https://example.test/api/conversation/reply?id=12', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ body: 'A delivered reply' }),
+    }), {
+      DB: fakeDatabase(),
+      BREVO_API_KEY: 'test-only-key',
+      REPLY_FROM_EMAIL: 'verified@example.test',
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(response.status, 201);
+  const payload = await response.json();
+  assert.equal(payload.saved, true);
+  assert.equal(payload.emailSent, true);
+});
+
+test('admin reply response reports a D1 write failure without claiming success', async () => {
+  const db = fakeDatabase();
+  db.batch = async () => { throw new Error('synthetic database failure'); };
+  const response = await worker.fetch(new Request('https://example.test/api/conversation/reply?id=12', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ body: 'A reply that cannot be saved' }),
+  }), { DB: db });
+
+  assert.equal(response.status, 503);
+  const payload = await response.json();
+  assert.equal(payload.saved, false);
+  assert.equal(payload.emailSent, false);
+});
 
 test('contact email helper sends a Brevo notification to the administrator', async () => {
   let request;
@@ -77,6 +142,8 @@ test('contact email helper sends a Brevo notification to the administrator', asy
     email: 'visitor@example.test',
     subject: 'Project enquiry',
     message: 'Please contact me.',
+    timestamp: '2026-10-05T12:00:00.000Z',
+    ipAddress: '192.0.2.10',
   }, async (url, options) => {
     request = { url, options };
     return { ok: true, status: 201 };
@@ -89,6 +156,8 @@ test('contact email helper sends a Brevo notification to the administrator', asy
   assert.deepEqual(payload.to, [{ email: 'yangdarenaud893@gmail.com' }]);
   assert.deepEqual(payload.replyTo, { email: 'visitor@example.test', name: 'Visitor' });
   assert.match(payload.textContent, /Please contact me\./);
+  assert.match(payload.textContent, /Timestamp: 2026-10-05T12:00:00\.000Z/);
+  assert.match(payload.textContent, /IP address: 192\.0\.2\.10/);
 });
 
 test('contact submission persists D1 records, dispatches email, and reports all outcomes', async () => {
@@ -125,7 +194,7 @@ test('contact submission persists D1 records, dispatches email, and reports all 
     saved: true,
     notificationCreated: true,
     emailSent: true,
-    message: 'Your message has been successfully sent.',
+    message: 'Thank you for your message. I will respond as soon as possible.',
   });
   assert.equal(db.batches.length, 1);
   assert.match(db.batches[0][1].sql, /INSERT INTO conversations/);
@@ -163,6 +232,23 @@ test('contact submission reports emailSent false when Brevo fails after D1 save'
   assert.equal(payload.saved, true);
   assert.equal(payload.notificationCreated, true);
   assert.equal(payload.emailSent, false);
+  assert.equal(payload.message, 'Your message was received successfully.');
+});
+
+test('local frontend origin is allowed and unrelated origins are rejected', async () => {
+  const allowed = await worker.fetch(new Request('https://example.test/api/contact', {
+    method: 'OPTIONS',
+    headers: { Origin: 'http://127.0.0.1:8000' },
+  }), { DB: fakeDatabase() });
+  assert.equal(allowed.status, 204);
+  assert.equal(allowed.headers.get('access-control-allow-origin'), 'http://127.0.0.1:8000');
+
+  const rejected = await worker.fetch(new Request('https://example.test/api/contact', {
+    method: 'OPTIONS',
+    headers: { Origin: 'https://attacker.example' },
+  }), { DB: fakeDatabase() });
+  assert.equal(rejected.status, 403);
+  assert.equal(rejected.headers.get('access-control-allow-origin'), null);
 });
 
 test('notification read routes require authentication and persist D1 read state', async () => {
@@ -196,6 +282,25 @@ test('notification read routes require authentication and persist D1 read state'
   assert.equal(listed.read_state_supported, true);
   assert.equal(listed.unread_count, 0);
   assert.ok(db.statements.some((statement) => statement.sql.includes('notifications.read_at')));
+});
+
+test('notification DELETE requires authentication and persists deletion', async () => {
+  const db = fakeDatabase();
+  const unauthorized = await worker.fetch(new Request('https://example.test/api/notifications?id=8', {
+    method: 'DELETE',
+  }), { DB: db });
+  assert.equal(unauthorized.status, 401);
+
+  const authorized = await worker.fetch(new Request('https://example.test/api/notifications?id=8', {
+    method: 'DELETE',
+    headers: { Authorization: 'Bearer test-token' },
+  }), { DB: db });
+  assert.equal(authorized.status, 200);
+  assert.deepEqual(await authorized.json(), {
+    ok: true,
+    data: { id: '8', deleted: true },
+  });
+  assert.ok(db.statements.some((statement) => statement.sql.includes('DELETE FROM notifications')));
 });
 
 test('allowed DELETE preflight returns 204 with DELETE CORS permission', async () => {

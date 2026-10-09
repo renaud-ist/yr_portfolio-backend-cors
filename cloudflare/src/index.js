@@ -3,6 +3,8 @@
 const jsonHeaders = { 'content-type': 'application/json; charset=utf-8' };
 const allowedOrigins = new Set([
   'https://renaud-ist.github.io',
+  'http://localhost:8000',
+  'http://127.0.0.1:8000',
   'http://localhost:8080',
   'http://127.0.0.1:8080',
   'http://localhost:5500',
@@ -168,7 +170,7 @@ async function sendAdminContactEmail(env, contact, fetchImplementation = fetch) 
         to: [{ email: 'yangdarenaud893@gmail.com' }],
         replyTo: { email: contact.email, name: contact.name },
         subject: `New portfolio contact: ${contact.subject}`,
-        textContent: `Name: ${contact.name}\nEmail: ${contact.email}\nSubject: ${contact.subject}\n\n${contact.message}`,
+        textContent: `Name: ${contact.name}\nEmail: ${contact.email}\nSubject: ${contact.subject}\nTimestamp: ${contact.timestamp}\nIP address: ${contact.ipAddress || 'Unavailable'}\n\n${contact.message}`,
       }),
     });
 
@@ -183,7 +185,12 @@ async function sendAdminContactEmail(env, contact, fetchImplementation = fetch) 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const headers = corsHeaders(request.headers.get('Origin'));
+    const origin = request.headers.get('Origin');
+    const headers = corsHeaders(origin);
+
+    if (origin && !allowedOrigins.has(origin)) {
+      return jsonResponse({ ok: false, error: 'Origin is not allowed.' }, 403);
+    }
 
     if (request.method === 'OPTIONS' && headers['access-control-allow-origin']) {
       return new Response(null, { status: 204, headers });
@@ -195,6 +202,7 @@ export default {
         return jsonResponse({ ok: false, error: 'Authentication required.' }, 401, headers);
       }
 
+      let replySaved = false;
       try {
         const tokenHash = await hashAuthToken(rawToken);
         const activeToken = await findActiveAdminToken(env, tokenHash);
@@ -915,6 +923,7 @@ export default {
         }, 422, headers);
       }
 
+      let replySaved = false;
       try {
         const conversation = await env.DB.prepare(
           `SELECT id, contact_name, contact_email, subject, status,
@@ -986,24 +995,34 @@ export default {
         ]);
 
         const insertedMessageId = Number(result[0]?.meta?.last_row_id || 0);
+        replySaved = (result[0]?.meta?.changes ?? 0) === 1 && insertedMessageId > 0;
 
-        if (!insertedMessageId) {
+        if (!replySaved) {
           return jsonResponse({
             ok: false,
+            saved: false,
+            emailSent: false,
             error: 'The reply could not be saved. Please try again later.'
           }, 503, headers);
         }
 
-        const updated = await env.DB.prepare(
-          `SELECT last_message_at
-           FROM conversations
-           WHERE id = ?`
-        ).bind(conversationId).first();
+        let updated = null;
+        try {
+          updated = await env.DB.prepare(
+            `SELECT last_message_at
+             FROM conversations
+             WHERE id = ?`
+          ).bind(conversationId).first();
+        } catch (error) {
+          updated = null;
+        }
 
         const email = await sendReplyEmail(env, conversation, body);
 
         return jsonResponse({
           ok: true,
+          saved: true,
+          emailSent: email.sent,
           data: {
             message: {
               id: String(insertedMessageId),
@@ -1024,6 +1043,8 @@ export default {
       } catch (error) {
         return jsonResponse({
           ok: false,
+          saved: replySaved,
+          emailSent: false,
           error: 'The reply could not be saved. Please try again later.'
         }, 503, headers);
       }
@@ -1346,8 +1367,30 @@ export default {
           }, 429, headers);
         }
 
-        const emailResult = await sendAdminContactEmail(env, { name, email, subject, message });
         const notificationId = Number(batchResults[3]?.meta?.last_row_id || 0);
+        const saved = (batchResults[1]?.meta?.changes ?? 0) === 1
+          && (batchResults[2]?.meta?.changes ?? 0) === 1;
+        const notificationCreated = (batchResults[3]?.meta?.changes ?? 0) === 1
+          && notificationId > 0;
+
+        if (!saved || !notificationCreated) {
+          return jsonResponse({
+            ok: false,
+            saved,
+            notificationCreated,
+            emailSent: false,
+            error: 'The message could not be saved.',
+          }, 500, headers);
+        }
+
+        const emailResult = await sendAdminContactEmail(env, {
+          name,
+          email,
+          subject,
+          message,
+          timestamp: new Date().toISOString(),
+          ipAddress: request.headers.get('CF-Connecting-IP'),
+        });
         if (notificationId) {
           try {
             await env.DB.prepare(
@@ -1366,10 +1409,12 @@ export default {
 
         return jsonResponse({
           ok: true,
-          saved: true,
-          notificationCreated: true,
+          saved,
+          notificationCreated,
           emailSent: emailResult.sent,
-          message: 'Your message has been successfully sent.',
+          message: emailResult.sent
+            ? 'Thank you for your message. I will respond as soon as possible.'
+            : 'Your message was received successfully.',
         }, 201, headers);
       } catch (error) {
         return jsonResponse({ ok: false, error: 'The message could not be saved.' }, 500, headers);

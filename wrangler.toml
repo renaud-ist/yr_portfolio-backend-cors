@@ -1,4 +1,4 @@
-name = "myportfolio-api-proxy"
+name = "yr-portfolio-api-proxy"
 main = "cloudflare/src/index.js"
 compatibility_date = "2026-09-13"
 

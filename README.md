@@ -30,7 +30,6 @@ cloudflare/src/index.js     Worker implementation
 cloudflare/migrations/      D1 migration files
 wrangler.toml               Worker and D1 configuration
 README.md                   Project overview
-DEPLOYMENT.md               Deployment guidance for current environment
 ```
 
 ## Runtime responsibilities
@@ -95,8 +94,49 @@ These are the routes the GitHub Pages frontend consumes.
 - Use the Worker and D1 only as the authoritative production backend
 - Treat older PHP or MySQL instructions as historical context only
 
-## Notes
+## Configuration and deployment
 
-The legacy PHP-driven documentation and MySQL setup files are not the current production design. The authoritative deployment documentation for this backend is the Cloudflare Worker + D1 model described in this README and the project deployment guide.
+The checked-in `wrangler.toml` configures Worker `myportfolio-api-proxy`, entry point `cloudflare/src/index.js`, D1 binding `DB`, database `myportfolio-db`, and migration directory `cloudflare/migrations`. Confirm the Cloudflare account and target environment before applying remote migrations or deploying.
+
+Set secrets in Cloudflare, never in source, `.dev.vars`, shell history, or documentation:
+
+- Required secret: `BREVO_API_KEY`
+- Required verified sender variable: `REPLY_FROM_EMAIL`
+- Optional sender display name: `REPLY_FROM_NAME`
+
+The contact email is sent to `yangdarenaud893@gmail.com`; admin replies go only to the visitor address stored in the conversation. Confirm the Brevo sender/domain is verified before relying on delivery.
+
+Use Wrangler to inspect and operate D1 and deploy the Worker:
+
+```bash
+npx wrangler d1 list
+npx wrangler d1 migrations apply myportfolio-db --remote
+npx wrangler deploy
+```
+
+Do not create or mutate production data as part of local testing. Use Wrangler's local D1 environment and apply migrations locally for development.
+
+## API and persistence behavior
+
+`POST /api/contact` accepts JSON fields `name`, `email`, `subject`, and `message`. It rate-limits by a hash of Cloudflare client IP/user agent, then writes the conversation, visitor message, and admin notification in one D1 batch. A successful response includes `saved`, `notificationCreated`, and `emailSent`; contact data remains saved when Brevo delivery fails. The email includes visitor name/email, subject, message, server timestamp, and Cloudflare client IP when available.
+
+Admin replies return top-level `saved` and `emailSent` outcomes in addition to message data. Notification list/read-one/read-all/delete and conversation operations require a valid bearer token. Notification unread count and read state come from D1, not browser storage.
+
+The Worker CORS allowlist is in `cloudflare/src/index.js`: the production GitHub Pages origin and explicitly named local development origins are allowed; requests carrying another Origin receive `403`. Keep it aligned with the actual frontend origin and test preflight after any domain change.
+
+## Testing and release checks
+
+Run the repository contract suite and source syntax check before deployment:
+
+```bash
+node --test tests/worker_contract.test.js
+node --check cloudflare/src/index.js
+```
+
+The tests cover contact persistence/email outcomes, required email fields and recipient, CORS, authentication, notification read-one/read-all persistence, and reply-email provider outcomes. They do not connect to production D1 or Brevo. After a staging deployment, verify contact creation and notification count in D1, mark one/all notifications read and reload the dashboard, test reply delivery with Brevo, and inspect Worker logs without exposing credentials or message bodies.
+
+Keep visitor IP collection limited to trusted `CF-Connecting-IP`; do not accept a body-supplied IP or trust arbitrary forwarding headers. Retain contact data and IP addresses only as long as operationally necessary, and publish an appropriate privacy/retention notice.
+
+The legacy PHP-driven documentation and MySQL setup files are not the current production design. This README is the sole project Markdown document and the source of truth for Worker setup and deployment.
 
 The portfolio describes verified academic and service experience. Add repositories, screenshots, live demos, employment history, or certifications only when their details can be verified.
