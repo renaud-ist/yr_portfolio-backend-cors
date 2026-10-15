@@ -144,7 +144,7 @@ const API_BASE_URL = (() => {
     return 'http://127.0.0.1:8787';
   }
 
-  return 'https://myportfolio-api-proxy.yangdarenaud893.workers.dev';
+  return 'https://yr-portfolio-api-proxy.yangdarenaud893.workers.dev';
 })();
 
 const safeText = (value) => value == null ? '' : String(value).replace(/\s+/g, ' ').trim();
