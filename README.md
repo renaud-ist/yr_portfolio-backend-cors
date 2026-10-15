@@ -1,4 +1,4 @@
-# MyPortfolio backend API
+# yr_portfolio backend API
 
 This repository is the production backend for the MyPortfolio frontend. The currently verified architecture is:
 
