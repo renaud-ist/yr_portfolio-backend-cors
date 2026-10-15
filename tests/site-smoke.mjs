@@ -34,7 +34,7 @@ assert.match(html, /<h1\b/, 'Page needs a primary heading');
 assert.match(html, /rel="canonical"/, 'Page needs canonical metadata');
 assert.match(html, /role="status" aria-live="polite"/, 'Contact status needs a live announcement');
 assert.match(html, /"@type": "Person"/, 'Page needs structured profile data');
-assert.match(script, /https:\/\/myportfolio-api-proxy\.yangdarenaud893\.workers\.dev/, 'Production API must use the configured Worker');
+assert.match(script, /https:\/\/yr-portfolio-api-proxy\.yangdarenaud893\.workers\.dev/, 'Production API must use the configured Worker');
 assert.doesNotMatch(script, /localStorage/, 'Admin tokens must not persist in localStorage');
 assert.match(script, /data-notification-read/, 'Notification rows need a mark-read action');
 assert.match(script, /api\/notifications\?id=.*PATCH/s, 'Mark-read must persist through the notification API');
@@ -129,3 +129,5 @@ for (const match of html.matchAll(/href="#([^"]+)"/g)) {
 }
 
 console.log(`PASS: ${ids.length} unique IDs, ${localPaths.size} local assets, all in-page anchors, resume files, metadata, and Pages allowlist.`);
+
+
